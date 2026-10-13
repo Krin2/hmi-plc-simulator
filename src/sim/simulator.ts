@@ -8,6 +8,7 @@ import {
   type PlcConfig,
   type PlcState,
   type Rung,
+  type ScanResult,
 } from '../plc/types'
 import {
   initialProcess,
@@ -28,8 +29,12 @@ export const MIN_SETPOINT_GAP = 10
 export type Fault = 'pump' | 'sensor'
 
 export type Command =
+  /** Manual mode: open the inlet (run the pump) / close it */
   | { type: 'start' }
   | { type: 'stop' }
+  /** Manual mode: open / close the outlet valve */
+  | { type: 'openOutlet' }
+  | { type: 'closeOutlet' }
   | { type: 'ack' }
   | { type: 'reset' }
   | { type: 'setMode'; mode: Mode }
@@ -61,7 +66,14 @@ export interface SimSnapshot {
   pumpCmd: boolean
   pumpRunning: boolean
   pumpFaultInjected: boolean
+  /** Operator-set opening of the outlet valve, used while the PLC lets the valve be open */
   outletOpenPct: number
+  /** The PLC lets the outlet valve open (false = shut by an interlock or by the operator) */
+  outletOpen: boolean
+  /** Why each flow is closed (null = free to open) */
+  blocks: ScanResult['blocks']
+  /** Level switches HH / H / L / LL: true while the level is beyond the limit */
+  levelSwitches: ScanResult['levelSwitches']
   eStopPressed: boolean
   horn: boolean
   config: PlcConfig
@@ -70,6 +82,15 @@ export interface SimSnapshot {
   rungs: Rung[]
   trend: TrendSample[]
 }
+
+const noPulses = () => ({
+  start: false,
+  stop: false,
+  openOutlet: false,
+  closeOutlet: false,
+  ack: false,
+  reset: false,
+})
 
 /**
  * Connects the PLC program to the process model and the operator: every tick it builds the
@@ -82,6 +103,14 @@ export class Simulator {
   private ticks = 0
   private rungs: Rung[] = []
   private horn = false
+  private outletOpen = false
+  private blocks: ScanResult['blocks'] = { inlet: null, outlet: null }
+  private levelSwitches: ScanResult['levelSwitches'] = {
+    highHigh: false,
+    high: false,
+    low: false,
+    lowLow: false,
+  }
   private measured = 50
   private trend: TrendSample[] = []
 
@@ -91,7 +120,7 @@ export class Simulator {
   private pumpFault = false
   private sensorFault = false
   /** Push buttons are momentary: they stay "pressed" for exactly one scan */
-  private pulses = { start: false, stop: false, ack: false, reset: false }
+  private pulses = noPulses()
 
   private listeners = new Set<() => void>()
   private snapshot: SimSnapshot
@@ -113,6 +142,8 @@ export class Simulator {
     switch (command.type) {
       case 'start':
       case 'stop':
+      case 'openOutlet':
+      case 'closeOutlet':
       case 'ack':
       case 'reset':
         this.pulses[command.type] = true
@@ -158,6 +189,8 @@ export class Simulator {
         autoSelected: this.mode === 'auto',
         startPb: pulses.start,
         stopPb: pulses.stop,
+        openOutletPb: pulses.openOutlet,
+        closeOutletPb: pulses.closeOutlet,
         ackPb: pulses.ack,
         resetPb: pulses.reset,
       },
@@ -167,14 +200,18 @@ export class Simulator {
     this.plc = result.state
     this.rungs = result.rungs
     this.horn = result.outputs.horn
-    this.pulses = { start: false, stop: false, ack: false, reset: false }
+    this.outletOpen = result.outputs.outletOpen
+    this.blocks = result.blocks
+    this.levelSwitches = result.levelSwitches
+    this.pulses = noPulses()
 
     this.process = stepProcess(
       this.process,
       {
         pumpCmd: result.outputs.pumpCmd,
         pumpFault: this.pumpFault,
-        outletOpenPct: this.outletOpenPct,
+        // The PLC decides whether the valve may be open; the operator sets how far
+        outletOpenPct: result.outputs.outletOpen ? this.outletOpenPct : 0,
       },
       TICK_MS / 1000,
     )
@@ -197,8 +234,11 @@ export class Simulator {
     this.ticks = 0
     this.rungs = []
     this.horn = false
+    this.outletOpen = false
+    this.blocks = { inlet: null, outlet: null }
+    this.levelSwitches = { highHigh: false, high: false, low: false, lowLow: false }
     this.trend = []
-    this.pulses = { start: false, stop: false, ack: false, reset: false }
+    this.pulses = noPulses()
     this.measured = measureLevel(this.process.levelPct, this.sensorFault, 0)
     this.publish()
   }
@@ -242,6 +282,9 @@ export class Simulator {
       pumpRunning: isPumpRunning(this.process),
       pumpFaultInjected: this.pumpFault,
       outletOpenPct: this.outletOpenPct,
+      outletOpen: this.outletOpen,
+      blocks: this.blocks,
+      levelSwitches: this.levelSwitches,
       eStopPressed: this.eStopPressed,
       horn: this.horn,
       config: this.config,

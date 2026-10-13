@@ -18,6 +18,8 @@ const idle: PlcInputs = {
   autoSelected: true,
   startPb: false,
   stopPb: false,
+  openOutletPb: false,
+  closeOutletPb: false,
   ackPb: false,
   resetPb: false,
 }
@@ -37,7 +39,7 @@ function runFor(state: PlcState, input: Partial<PlcInputs>, scans: number): Scan
 /** One-scan push button press followed by a scan with the button released. */
 function press(
   state: PlcState,
-  button: 'startPb' | 'stopPb' | 'ackPb' | 'resetPb',
+  button: 'startPb' | 'stopPb' | 'openOutletPb' | 'closeOutletPb' | 'ackPb' | 'resetPb',
   input: Partial<PlcInputs> = {},
 ) {
   return run(run(state, { ...input, [button]: true }).state, input)
@@ -272,13 +274,248 @@ describe('logic viewer', () => {
       'estop',
       'pump-fail-timer',
       'lockout',
+      'hh-cutoff',
+      'll-cutoff',
       'auto-demand',
-      'trip',
+      'inlet-block',
+      'outlet-block',
       'manual-run',
+      'manual-outlet',
       'pump-cmd',
+      'outlet-cmd',
     ])
     expect(byId['pump-cmd']?.energized).toBe(true)
     expect(byId['auto-demand']?.energized).toBe(true)
-    expect(byId['trip']?.energized).toBe(false)
+    expect(byId['inlet-block']?.energized).toBe(false)
+    expect(byId['outlet-cmd']?.energized).toBe(true)
+  })
+})
+
+describe('level switches', () => {
+  it('light up exactly while the level is beyond each limit', () => {
+    const at = (levelPct: number) => run(initialPlcState(), { levelPct }).levelSwitches
+    expect(at(50)).toEqual({ highHigh: false, high: false, low: false, lowLow: false })
+    expect(at(85)).toEqual({ highHigh: false, high: true, low: false, lowLow: false })
+    expect(at(96)).toEqual({ highHigh: true, high: true, low: false, lowLow: false })
+    expect(at(15)).toEqual({ highHigh: false, high: false, low: true, lowLow: false })
+    expect(at(4)).toEqual({ highHigh: false, high: false, low: true, lowLow: true })
+  })
+
+  it('have a deadband: a switch that is ON turns OFF only once the level is 1 % back inside', () => {
+    let result = run(initialPlcState(), { levelPct: 4.9 })
+    expect(result.levelSwitches.lowLow).toBe(true)
+    result = run(result.state, { levelPct: 5.5 })
+    expect(result.levelSwitches.lowLow).toBe(true) // above the limit, but inside the deadband
+    result = run(result.state, { levelPct: 6 })
+    expect(result.levelSwitches.lowLow).toBe(false)
+
+    result = run(initialPlcState(), { levelPct: 95 })
+    expect(result.levelSwitches.highHigh).toBe(true)
+    result = run(result.state, { levelPct: 94.5 })
+    expect(result.levelSwitches.highHigh).toBe(true)
+    result = run(result.state, { levelPct: 94 })
+    expect(result.levelSwitches.highHigh).toBe(false)
+  })
+
+  it('do not re-raise an alarm when noise makes the level cross the limit back and forth', () => {
+    let result = run(initialPlcState(), { levelPct: 4.9 })
+    result = press(result.state, 'ackPb', { levelPct: 4.9 })
+    expect(result.outputs.horn).toBe(false)
+
+    for (const levelPct of [5.1, 4.9, 5.2, 4.8, 5.1, 4.9]) {
+      result = run(result.state, { levelPct })
+      expect(alarm(result, 'levelLowLow')).toMatchObject({ active: true, acked: true })
+      expect(result.outputs.horn).toBe(false)
+    }
+  })
+
+  it('are all off when the level signal is not valid', () => {
+    expect(run(initialPlcState(), { levelPct: -5 }).levelSwitches).toEqual({
+      highHigh: false,
+      high: false,
+      low: false,
+      lowLow: false,
+    })
+  })
+})
+
+describe('outlet (valve XV-101)', () => {
+  it('is open in auto mode while no interlock holds it closed', () => {
+    const result = run(initialPlcState(), { levelPct: 50 })
+    expect(result.outputs.outletOpen).toBe(true)
+    expect(result.blocks.outlet).toBeNull()
+  })
+
+  it('closes at LL and reopens only once the level is back above L (hysteresis)', () => {
+    let result = run(initialPlcState(), { levelPct: 5 })
+    expect(result.outputs.outletOpen).toBe(false)
+    expect(result.blocks.outlet).toBe('level-ll')
+
+    // Back above LL but still below L: the outlet stays closed
+    result = run(result.state, { levelPct: 10 })
+    expect(result.outputs.outletOpen).toBe(false)
+    expect(result.blocks.outlet).toBe('level-ll')
+    expect(result.levelSwitches.lowLow).toBe(false) // the switch is off, the cut-off is still latched
+
+    result = run(result.state, { levelPct: 14.9 })
+    expect(result.outputs.outletOpen).toBe(false)
+
+    result = run(result.state, { levelPct: 15 })
+    expect(result.outputs.outletOpen).toBe(true)
+  })
+
+  it('does not close the inlet: LL only stops the outlet', () => {
+    const result = run(initialPlcState(), { levelPct: 4 })
+    expect(result.outputs.outletOpen).toBe(false)
+    expect(result.outputs.pumpCmd).toBe(true) // auto demand fills the tank
+  })
+
+  it('is opened and closed by the operator in manual mode, independently of the inlet', () => {
+    const manual = { autoSelected: false, levelPct: 50 }
+    let result = press(initialPlcState(), 'openOutletPb', manual)
+    expect(result.outputs.outletOpen).toBe(true)
+    expect(result.outputs.pumpCmd).toBe(false) // the inlet is not affected
+
+    result = press(result.state, 'startPb', manual)
+    expect(result.outputs.pumpCmd).toBe(true)
+    expect(result.outputs.outletOpen).toBe(true)
+
+    result = press(result.state, 'closeOutletPb', { ...manual, pumpRunning: true })
+    expect(result.outputs.outletOpen).toBe(false)
+    expect(result.outputs.pumpCmd).toBe(true) // still filling, the outlet is closed on purpose
+
+    result = press(result.state, 'stopPb', { ...manual, pumpRunning: true })
+    expect(result.outputs.pumpCmd).toBe(false)
+    expect(result.outputs.outletOpen).toBe(false)
+  })
+
+  it('keeps its position when switching from auto to manual (bumpless transfer)', () => {
+    let result = run(initialPlcState(), { levelPct: 50 })
+    expect(result.outputs.outletOpen).toBe(true)
+    result = run(result.state, { levelPct: 50, autoSelected: false })
+    expect(result.outputs.outletOpen).toBe(true)
+    result = run(result.state, { levelPct: 50, autoSelected: false })
+    expect(result.outputs.outletOpen).toBe(true) // and it stays that way
+
+    result = press(result.state, 'closeOutletPb', { levelPct: 50, autoSelected: false })
+    expect(result.outputs.outletOpen).toBe(false)
+  })
+
+  it('cannot be opened by the operator while the LL cut-off holds it closed', () => {
+    const manual = { autoSelected: false }
+    let result = run(initialPlcState(), { ...manual, levelPct: 4 })
+    result = press(result.state, 'openOutletPb', { ...manual, levelPct: 4 })
+    expect(result.outputs.outletOpen).toBe(false)
+
+    // Once the level is above L, a new press opens it
+    result = press(result.state, 'openOutletPb', { ...manual, levelPct: 20 })
+    expect(result.outputs.outletOpen).toBe(true)
+  })
+
+  it('is closed by LL even if the operator had it open, and stays closed afterwards', () => {
+    const manual = { autoSelected: false }
+    let result = press(initialPlcState(), 'openOutletPb', { ...manual, levelPct: 30 })
+    expect(result.outputs.outletOpen).toBe(true)
+    result = run(result.state, { ...manual, levelPct: 4 })
+    expect(result.outputs.outletOpen).toBe(false)
+    result = run(result.state, { ...manual, levelPct: 30 })
+    expect(result.outputs.outletOpen).toBe(false) // no automatic reopening in manual
+  })
+})
+
+describe('inlet (pump P-101) HH cut-off', () => {
+  it('closes at HH and reopens below H (hysteresis) in auto mode', () => {
+    // Auto demand would not ask for the pump here, so check the block itself
+    let result = run(initialPlcState(), { levelPct: 96 })
+    expect(result.blocks.inlet).toBe('level-hh')
+    expect(result.outputs.pumpCmd).toBe(false)
+
+    result = run(result.state, { levelPct: 90 }) // below HH, above H: still closed
+    expect(result.blocks.inlet).toBe('level-hh')
+
+    result = run(result.state, { levelPct: 85 })
+    expect(result.blocks.inlet).toBeNull()
+  })
+
+  it('does not close the outlet: HH only stops the inlet', () => {
+    const result = run(initialPlcState(), { levelPct: 96 })
+    expect(result.outputs.outletOpen).toBe(true)
+  })
+
+  it('cannot be opened by the operator in manual mode until the level is below H', () => {
+    const manual = { autoSelected: false }
+    let result = run(initialPlcState(), { ...manual, levelPct: 96 })
+    result = press(result.state, 'startPb', { ...manual, levelPct: 96 })
+    expect(result.outputs.pumpCmd).toBe(false)
+    result = press(result.state, 'startPb', { ...manual, levelPct: 90 })
+    expect(result.outputs.pumpCmd).toBe(false) // still latched
+    result = press(result.state, 'startPb', { ...manual, levelPct: 80 })
+    expect(result.outputs.pumpCmd).toBe(true)
+  })
+})
+
+describe('emergency stop and the two flows', () => {
+  it('in auto mode it closes both the inlet and the outlet', () => {
+    let result = run(initialPlcState(), { levelPct: 30 })
+    expect(result.outputs).toMatchObject({ pumpCmd: true, outletOpen: true })
+
+    result = run(result.state, { levelPct: 30, pumpRunning: true, eStopHealthy: false })
+    expect(result.outputs).toMatchObject({ pumpCmd: false, outletOpen: false })
+    expect(result.blocks).toEqual({ inlet: 'e-stop', outlet: 'e-stop' })
+    expect(alarm(result, 'eStop').active).toBe(true)
+  })
+
+  it('in auto mode both flows stay closed after release until a reset', () => {
+    let result = run(initialPlcState(), { levelPct: 30, eStopHealthy: false })
+    result = run(result.state, { levelPct: 30, eStopHealthy: true })
+    expect(result.outputs).toMatchObject({ pumpCmd: false, outletOpen: false })
+
+    result = press(result.state, 'resetPb', { levelPct: 30 })
+    expect(result.outputs).toMatchObject({ pumpCmd: true, outletOpen: true })
+  })
+
+  it('in manual mode the operator can still open and close each flow', () => {
+    const manual = { autoSelected: false, levelPct: 50, eStopHealthy: false }
+    let result = run(initialPlcState(), manual)
+    expect(alarm(result, 'eStop').active).toBe(true) // the alarm is raised in every mode
+    expect(result.blocks).toEqual({ inlet: null, outlet: null })
+
+    result = press(result.state, 'startPb', manual)
+    expect(result.outputs.pumpCmd).toBe(true)
+    result = press(result.state, 'openOutletPb', { ...manual, pumpRunning: true })
+    expect(result.outputs.outletOpen).toBe(true)
+
+    result = press(result.state, 'stopPb', { ...manual, pumpRunning: true })
+    expect(result.outputs.pumpCmd).toBe(false)
+    expect(result.outputs.outletOpen).toBe(true) // independent of each other
+  })
+
+  it('in manual mode the HH and LL cut-offs still apply with the emergency stop pressed', () => {
+    const manual = { autoSelected: false, eStopHealthy: false }
+    let result = press(initialPlcState(), 'startPb', { ...manual, levelPct: 50 })
+    result = run(result.state, { ...manual, levelPct: 96, pumpRunning: true })
+    expect(result.outputs.pumpCmd).toBe(false)
+    expect(result.blocks.inlet).toBe('level-hh')
+
+    result = press(initialPlcState(), 'openOutletPb', { ...manual, levelPct: 50 })
+    result = run(result.state, { ...manual, levelPct: 4 })
+    expect(result.outputs.outletOpen).toBe(false)
+    expect(result.blocks.outlet).toBe('level-ll')
+  })
+
+  it('switching from manual to auto applies a pressed emergency stop at once', () => {
+    const base = { eStopHealthy: false, levelPct: 30 }
+    let result = press(initialPlcState(), 'startPb', { ...base, autoSelected: false })
+    expect(result.outputs.pumpCmd).toBe(true)
+    result = run(result.state, { ...base, autoSelected: true, pumpRunning: true })
+    expect(result.outputs).toMatchObject({ pumpCmd: false, outletOpen: false })
+  })
+
+  it('a failed level signal closes both flows in every mode', () => {
+    for (const autoSelected of [true, false]) {
+      const result = run(initialPlcState(), { autoSelected, levelPct: -5 })
+      expect(result.outputs).toMatchObject({ pumpCmd: false, outletOpen: false })
+      expect(result.blocks).toEqual({ inlet: 'sensor-fault', outlet: 'sensor-fault' })
+    }
   })
 })

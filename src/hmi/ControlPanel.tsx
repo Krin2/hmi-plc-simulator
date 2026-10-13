@@ -66,7 +66,7 @@ export default function ControlPanel({ snapshot, send }: ControlPanelProps) {
         </div>
       </Group>
 
-      <Group title="Pump P-101 (manual mode)">
+      <Group title="Inlet: pump P-101 (manual mode)">
         <div className="flex gap-2">
           <button
             type="button"
@@ -74,7 +74,7 @@ export default function ControlPanel({ snapshot, send }: ControlPanelProps) {
             onClick={() => send({ type: 'start' })}
             className={`${button} ${idle} flex-1`}
           >
-            Start
+            Open inlet
           </button>
           <button
             type="button"
@@ -82,15 +82,40 @@ export default function ControlPanel({ snapshot, send }: ControlPanelProps) {
             onClick={() => send({ type: 'stop' })}
             className={`${button} ${idle} flex-1`}
           >
-            Stop
+            Close inlet
           </button>
         </div>
-        {auto && (
-          <p className="text-muted text-xs">Switch to manual mode to start or stop the pump.</p>
-        )}
+        <p className="text-muted text-xs">
+          {auto
+            ? 'Switch to manual mode to open or close the inlet yourself.'
+            : 'The inlet cannot be opened while the level is at HH (until it falls below H).'}
+        </p>
       </Group>
 
-      <Group title="Outlet valve XV-101">
+      <Group title="Outlet: valve XV-101">
+        <div className="flex gap-2">
+          <button
+            type="button"
+            disabled={auto}
+            onClick={() => send({ type: 'openOutlet' })}
+            className={`${button} ${idle} flex-1`}
+          >
+            Open outlet
+          </button>
+          <button
+            type="button"
+            disabled={auto}
+            onClick={() => send({ type: 'closeOutlet' })}
+            className={`${button} ${idle} flex-1`}
+          >
+            Close outlet
+          </button>
+        </div>
+        <p className="text-muted text-xs">
+          {auto
+            ? 'In auto the outlet stays open unless an interlock closes it.'
+            : 'The outlet cannot be opened while the level is at LL (until it rises above L).'}
+        </p>
         <div className="flex justify-between text-sm">
           <label htmlFor="outlet">Opening</label>
           <output htmlFor="outlet" className="font-mono">
@@ -177,6 +202,11 @@ export default function ControlPanel({ snapshot, send }: ControlPanelProps) {
             Reset trips
           </button>
         </div>
+        <p className="text-muted text-xs">
+          In auto, the emergency stop closes both the inlet and the outlet. In manual, the operator
+          keeps control of each flow; only the HH and LL cut-offs and a failed level signal still
+          hold them closed.
+        </p>
       </Group>
     </section>
   )

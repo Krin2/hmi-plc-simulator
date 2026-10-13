@@ -181,6 +181,102 @@ describe('fault scenarios', () => {
   })
 })
 
+describe('flow cut-offs', () => {
+  it('LL closes the outlet: the tank stops draining and the outlet reopens above L', () => {
+    const { send, run, snap } = setup()
+    run(5)
+    send({ type: 'fault', fault: 'pump', on: true }) // nothing refills the tank
+    run(250)
+
+    let s = snap()
+    expect(s.levelSwitches.lowLow).toBe(true)
+    expect(s.blocks.outlet).toBe('level-ll')
+    expect(s.outletOpen).toBe(false)
+    expect(s.levelPct).toBeGreaterThan(3)
+    expect(s.levelPct).toBeLessThan(6)
+
+    // With the outlet shut the level holds: nothing drains it any further
+    const before = s.levelPct
+    run(60)
+    expect(Math.abs(snap().levelPct - before)).toBeLessThan(0.1)
+
+    // Repair the pump and reset the lockout: the tank fills, and the outlet reopens above L
+    send({ type: 'fault', fault: 'pump', on: false })
+    send({ type: 'reset' })
+    run(2)
+    expect(snap().outletOpen).toBe(false) // 5-6 % is still below L (15 %)
+    run(8)
+    s = snap()
+    expect(s.levelPct).toBeGreaterThan(15)
+    expect(s.blocks.outlet).toBeNull()
+    expect(s.outletOpen).toBe(true)
+  })
+
+  it('HH closes the inlet: the level stops rising and the operator cannot reopen it yet', () => {
+    const { send, run, snap } = setup()
+    run(1)
+    send({ type: 'setMode', mode: 'manual' })
+    send({ type: 'closeOutlet' })
+    send({ type: 'start' })
+    run(30)
+
+    let s = snap()
+    expect(s.levelSwitches.highHigh).toBe(true)
+    expect(s.blocks.inlet).toBe('level-hh')
+    expect(s.pumpCmd).toBe(false)
+    expect(s.levelPct).toBeLessThan(100)
+
+    // Still above H: a new start press has no effect
+    send({ type: 'start' })
+    run(2)
+    expect(snap().pumpCmd).toBe(false)
+
+    // Drain below H through the outlet, then the operator can open the inlet again
+    send({ type: 'setOutlet', pct: 100 })
+    send({ type: 'openOutlet' })
+    run(15)
+    s = snap()
+    expect(s.levelPct).toBeLessThan(85)
+    expect(s.blocks.inlet).toBeNull()
+    send({ type: 'start' })
+    run(0.3)
+    expect(snap().pumpCmd).toBe(true)
+  })
+
+  it('emergency stop in auto closes both flows, so the level stays put', () => {
+    const { send, run, snap } = setup()
+    run(10)
+    send({ type: 'eStop', pressed: true })
+    run(5) // let the pump coast down
+    const s = snap()
+    expect(s.pumpCmd).toBe(false)
+    expect(s.outletOpen).toBe(false)
+    expect(s.blocks).toEqual({ inlet: 'e-stop', outlet: 'e-stop' })
+
+    const level = s.levelPct
+    run(30)
+    expect(Math.abs(snap().levelPct - level)).toBeLessThan(0.05)
+  })
+
+  it('emergency stop in manual leaves the operator in control of each flow', () => {
+    const { send, run, snap } = setup()
+    run(1)
+    send({ type: 'setMode', mode: 'manual' })
+    send({ type: 'eStop', pressed: true })
+    run(1)
+    expect(snap().alarms.map((alarm) => alarm.id)).toContain('eStop')
+    expect(snap().outletOpen).toBe(true) // the valve keeps its position
+
+    send({ type: 'start' })
+    run(0.3)
+    expect(snap().pumpCmd).toBe(true)
+    send({ type: 'closeOutlet' })
+    run(0.3)
+    expect(snap().outletOpen).toBe(false)
+    expect(snap().pumpCmd).toBe(true) // independent of the inlet
+  })
+})
+
 describe('snapshot and subscription', () => {
   it('keeps the same snapshot object until something changes (required by useSyncExternalStore)', () => {
     const { sim, snap } = setup()

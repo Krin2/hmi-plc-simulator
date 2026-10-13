@@ -8,18 +8,33 @@ It brings together two backgrounds: ten years of industrial automation (PLCs, HM
 
 ## The process
 
-Pump P-101 fills tank T-101; the consumer drains it through valve XV-101. A level transmitter feeds the PLC, which commands the pump.
+Two flows are controlled: the **inlet** (pump P-101 fills tank T-101) and the **outlet** (the consumer drains it through valve XV-101). A level transmitter feeds the PLC, which commands both.
 
-| Mode       | Behavior                                                                                                                                                        |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Auto**   | The pump starts at or below the _start level_ and stops at or above the _stop level_ (hysteresis, so it does not chatter).                                      |
-| **Manual** | The operator starts and stops the pump with push buttons. The run latch drops on stop, on a trip and when leaving manual, so the pump never restarts by itself. |
+| Mode       | Behavior                                                                                                                                                                                                                                                         |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Auto**   | The pump starts at or below the _start level_ and stops at or above the _stop level_ (hysteresis, so it does not chatter). The outlet stays open unless an interlock closes it.                                                                                  |
+| **Manual** | The operator opens and closes the **inlet** and the **outlet independently**. The inlet latch drops on close, when blocked and when leaving manual, so the pump never restarts by itself. Switching from auto keeps the outlet where it was (bumpless transfer). |
+
+### Cut-offs and the emergency stop
+
+| Situation                       | Inlet (pump)                                                       | Outlet (valve)                                                 |
+| ------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------- |
+| Level **HH** (95 %)             | **Closes**, reopens only once the level is back below H (85 %)     | unaffected                                                     |
+| Level **LL** (5 %)              | unaffected                                                         | **Closes**, reopens only once the level is back above L (15 %) |
+| **Emergency stop**, auto mode   | Closes                                                             | Closes                                                         |
+| **Emergency stop**, manual mode | Operator decides (open/close), still limited by HH and the lockout | Operator decides (open/close), still limited by LL             |
+| Level transmitter failed        | Closes (all modes)                                                 | Closes (all modes)                                             |
+
+The HH and LL cut-offs apply in both modes, so in manual the operator cannot open the inlet at HH or the outlet at LL. The HMI marks the level switches HH, H, L and LL: they light up and say "ON" while the level is beyond the limit, and a note under the pump and the valve says why each flow is closed.
+
+> In manual mode the emergency stop only raises its alarm and leaves the flows to the operator. That is the behavior this demo was asked to show; a real plant would normally hard-wire the emergency stop to the final elements in every mode.
 
 ## The PLC program (`src/plc`)
 
 `scan(state, inputs, config, dt)` is one scan cycle: read inputs, solve the rungs top to bottom, write outputs. It is a **pure function**, so it is deterministic and easy to test. The HMI shows every rung live, with its logic and state.
 
-- **Interlocks** that stop the pump in every mode: level high-high, pump lockout, latched emergency stop, and a failed level signal.
+- **Interlocks**: HH closes the inlet and LL closes the outlet (both with hysteresis), plus pump lockout, the emergency stop (auto) and a failed level signal.
+- **Level switches with deadband**: a switch that is ON turns OFF only once the level is 1 % back inside the limit, so noise at the limit does not flicker the marks or re-raise an alarm.
 - **Emergency stop** latches and needs release _and_ a deliberate reset.
 - **Pump feedback timer** (`TON`, IEC 61131-3 semantics): if the pump is commanded but never reports "running" within 3 s, it is locked out until reset.
 - **Rising-edge push buttons**: a held button acts once, like a real `R_TRIG`.

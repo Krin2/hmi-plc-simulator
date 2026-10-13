@@ -40,8 +40,9 @@ describe('HMI', () => {
     const { advance } = setup()
     advance(0.1)
     const rows = within(screen.getByRole('table')).getAllByRole('row')
-    expect(rows).toHaveLength(8) // header + 7 rungs
-    expect(screen.getByText('Pump command')).toBeInTheDocument()
+    expect(rows).toHaveLength(13) // header + 12 rungs
+    expect(screen.getByText('Inlet: pump command')).toBeInTheDocument()
+    expect(screen.getByText('Outlet: valve open command')).toBeInTheDocument()
     expect(screen.getByText(/TON\(PUMP_CMD AND NOT PUMP_RUN, 3 s\)/)).toBeInTheDocument()
   })
 
@@ -67,28 +68,55 @@ describe('HMI', () => {
 })
 
 describe('manual operation', () => {
-  it('only enables the pump buttons in manual mode', async () => {
+  const manualButtons = ['Open inlet', 'Close inlet', 'Open outlet', 'Close outlet']
+
+  it('only enables the inlet and outlet buttons in manual mode', async () => {
     setup()
-    expect(screen.getByRole('button', { name: 'Start' })).toBeDisabled()
+    for (const name of manualButtons) {
+      expect(screen.getByRole('button', { name })).toBeDisabled()
+    }
     await userEvent.click(screen.getByRole('button', { name: 'manual' }))
-    expect(screen.getByRole('button', { name: 'Start' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled()
+    for (const name of manualButtons) {
+      expect(screen.getByRole('button', { name })).toBeEnabled()
+    }
   })
 
-  it('starts and stops the pump from the HMI', async () => {
+  it('opens and closes the inlet from the HMI', async () => {
     const { advance } = setup()
     await userEvent.click(screen.getByRole('button', { name: 'manual' }))
-    await userEvent.click(screen.getByRole('button', { name: 'Start' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Open inlet' }))
     advance(4)
     expect(screen.getByText('P-101 RUN')).toBeInTheDocument()
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet open')
 
-    await userEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Close inlet' }))
     advance(8)
     expect(screen.getByText('P-101 STOP')).toBeInTheDocument()
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet closed by operator')
+  })
+
+  it('opens and closes the outlet independently of the inlet', async () => {
+    const { advance } = setup()
+    advance(0.5)
+    expect(screen.getByTestId('outlet-state')).toHaveTextContent('XV-101 60%')
+
+    await userEvent.click(screen.getByRole('button', { name: 'manual' }))
+    advance(0.5)
+    expect(screen.getByTestId('outlet-state')).toHaveTextContent('XV-101 60%') // keeps its position
+
+    await userEvent.click(screen.getByRole('button', { name: 'Close outlet' }))
+    advance(0.5)
+    expect(screen.getByTestId('outlet-state')).toHaveTextContent('XV-101 CLOSED by operator')
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet closed by operator')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open outlet' }))
+    advance(0.5)
+    expect(screen.getByTestId('outlet-state')).toHaveTextContent('XV-101 60%')
   })
 
   it('moves the outlet valve with the slider', () => {
-    setup()
+    const { advance } = setup()
+    advance(0.5)
     const slider = screen.getByLabelText('Opening')
     expect(slider).toHaveValue('60')
     // userEvent cannot drag a range input, so fire the change event the browser would send
@@ -175,6 +203,83 @@ describe('alarms', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Emergency stop' }))
     advance(0.5)
     expect(screen.getByText('Critical alarm:')).toBeInTheDocument()
+  })
+})
+
+describe('level switches and cut-offs', () => {
+  const sw = (label: string) => screen.getByTestId(`switch-${label}`)
+
+  it('marks every level switch as ON only while the level is beyond its limit', async () => {
+    const { advance } = setup()
+    advance(0.5)
+    for (const label of ['HH', 'H', 'L', 'LL'])
+      expect(sw(label)).toHaveAttribute('data-active', 'false')
+
+    // Fill with the outlet closed: H and then HH switch on, in that order
+    await userEvent.click(screen.getByRole('button', { name: 'manual' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Close outlet' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Open inlet' }))
+    advance(14)
+    expect(sw('H')).toHaveAttribute('data-active', 'true')
+    expect(sw('HH')).toHaveAttribute('data-active', 'false')
+    expect(screen.getByText('H ON')).toBeInTheDocument()
+
+    advance(10)
+    expect(sw('HH')).toHaveAttribute('data-active', 'true')
+    expect(screen.getByText('HH ON')).toBeInTheDocument()
+  })
+
+  it('HH closes the inlet, and it stays closed until the level is back below H', async () => {
+    const { advance } = setup()
+    await userEvent.click(screen.getByRole('button', { name: 'manual' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Close outlet' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Open inlet' }))
+    advance(25)
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet closed: HH level')
+
+    // Open the outlet wide: the level falls, the HH switch goes off but the inlet stays closed
+    fireEvent.change(screen.getByLabelText('Opening'), { target: { value: '100' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Open outlet' }))
+    advance(3)
+    expect(sw('HH')).toHaveAttribute('data-active', 'false')
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet closed: HH level')
+
+    advance(10)
+    expect(sw('H')).toHaveAttribute('data-active', 'false')
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet closed by operator')
+  })
+
+  it('LL closes the outlet', async () => {
+    const { advance } = setup()
+    await userEvent.click(screen.getByRole('checkbox', { name: /Pump P-101 cannot run/ }))
+    advance(250)
+
+    expect(sw('LL')).toHaveAttribute('data-active', 'true')
+    expect(screen.getByText('LL ON')).toBeInTheDocument()
+    expect(screen.getByTestId('outlet-state')).toHaveTextContent('XV-101 CLOSED: LL level')
+  })
+
+  it('in auto, the emergency stop closes both the inlet and the outlet', async () => {
+    const { advance } = setup()
+    advance(0.5)
+    await userEvent.click(screen.getByRole('button', { name: 'Emergency stop' }))
+    advance(0.5)
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet closed: emergency stop')
+    expect(screen.getByTestId('outlet-state')).toHaveTextContent('XV-101 CLOSED: emergency stop')
+  })
+
+  it('in manual, the emergency stop leaves each flow under operator control', async () => {
+    const { advance } = setup()
+    advance(0.5) // the PLC scans in auto first, so the outlet is open when manual starts
+    await userEvent.click(screen.getByRole('button', { name: 'manual' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Emergency stop' }))
+    advance(0.5)
+    expect(banner()).toHaveTextContent('Emergency stop activated')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open inlet' }))
+    advance(0.5)
+    expect(screen.getByTestId('inlet-state')).toHaveTextContent('Inlet open')
+    expect(screen.getByTestId('outlet-state')).toHaveTextContent('XV-101 60%')
   })
 })
 

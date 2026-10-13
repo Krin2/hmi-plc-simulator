@@ -1,0 +1,12 @@
+# Secrets: environment variables, keys and certificates
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+node_modules
+dist
+*.local
+*.tsbuildinfo
+*.log

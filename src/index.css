@@ -1,0 +1,67 @@
+@import 'tailwindcss';
+
+/*
+ * High-performance HMI palette (ISA-101): a calm grey screen where normal states use neutral
+ * tones, so color is reserved for abnormal situations and draws the operator's attention.
+ */
+@theme {
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Code', Consolas, monospace;
+
+  --color-bg: #14171c;
+  --color-panel: #1c2027;
+  --color-border: #3b424d;
+  --color-text: #e6e9ee;
+  --color-muted: #a1a9b6;
+  --color-process: #8a93a1;
+  --color-liquid: #5f7fa6;
+  --color-accent: #d4af37;
+  --color-accent-text: #14171c;
+  --color-alarm1: #ff5a5a;
+  --color-alarm2: #ffb020;
+  --color-ok: #6fcf97;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  min-width: 320px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  line-height: 1.5;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@keyframes flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+.flow {
+  animation: flow 0.8s linear infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.blink {
+  animation: blink 1s steps(2, start) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow,
+  .blink {
+    animation: none;
+  }
+}
